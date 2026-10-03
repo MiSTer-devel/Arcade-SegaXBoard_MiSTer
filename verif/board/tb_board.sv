@@ -146,7 +146,7 @@ ddram_model ddram (
 );
 
 xb_core core (
-    .clk_sys(clk_sys), .clk_ram(clk_ram), .reset(reset), .pause(1'b0), .hires(hires), .rear_en(rear_en), .board_desc(desc),
+    .clk_sys(clk_sys), .clk_ram(clk_ram), .reset(core_reset), .pause(hs_pause), .hires(hires), .rear_en(rear_en), .board_desc(desc),
     .tile_wr(1'b0), .tile_waddr(18'd0), .tile_wdata(8'd0),
     .key_wr(1'b0), .key_waddr(13'd0), .key_wdata(8'd0),
     .DDRAM_BUSY(DDRAM_BUSY), .DDRAM_BURSTCNT(DDRAM_BURSTCNT), .DDRAM_ADDR(DDRAM_ADDR),
@@ -163,11 +163,120 @@ xb_core core (
     .p1_buttons({9'd0, p1_start, 6'd0}), .p2_buttons(16'd0), .aim1_x(8'sd0), .aim1_y(8'sd0), .aim2_x(8'sd0), .aim2_y(8'sd0), .stick2_x(8'sd0), .stick2_y(8'sd0), .gun_mode(1'b0), .speed1(4'd0), .speed2(4'd0), .xhair_en(1'b0), .stick_x(8'sd0), .stick_y(8'sd0), .throttle(8'h80), .stick_mode(2'd0), .ana_curve(2'd0), .ana_range(2'd0), .dpad_ramp(1'b0), .stick_recenter(1'b1), .ana_cal(1'b0),
     .dsw_a(dsw_a), .dsw_b(dsw_b), .service(1'b0), .test(1'b0), .coin1(coin1), .coin2(1'b0),
     .nv_download(1'b0), .nv_upload(1'b0), .nv_wr(1'b0), .nv_rd(1'b0), .nv_addr(15'd0), .nv_din(16'd0), .nv_dout(), .nv_modified(),
+    .hs_addr(hs_addr), .hs_din(hs_din), .hs_dout(hs_dout), .hs_write(hs_write), .hs_rd(hs_rd), .hs_wr(hs_wr),
     .r(r), .g(g), .b(b), .ce_vid(ce_pix), .hs(hs), .vs(vs), .hb(hb), .vb(vb),
     .audio_l(al), .audio_r(ar),
     .trace_main_addr(tm_addr), .trace_main_start(tm_start), .trace_main_fc(tm_fc),
     .trace_sub_addr(ts_addr), .trace_sub_start(ts_start), .trace_sub_fc(ts_fc)
 );
+
+// ---- hiscore (+hiscore=<dir>): the emu top's xb_hiscore driven the way the
+// HPS drives it. <dir>/hs_cfg.bin (ioctl index 5, header + entries) and
+// <dir>/hs_dump.bin (index 4, the saved table) stream through the 16-bit
+// ioctl path with the core held in reset; at +hs_check=N (start of that
+// frame) the backup RAM is compared with the dump, then the OSD is "opened"
+// (extraction, pauses the CPUs) and the dump is read back as an upload.
+string  hs_dir;
+reg     hs_en, hs_loading;
+initial begin hs_en = $value$plusargs("hiscore=%s", hs_dir); hs_loading = hs_en; end
+wire    core_reset = reset | hs_loading;
+reg         io_download = 1'b0, io_upload = 1'b0, io_wr = 1'b0, osd = 1'b0;
+reg  [26:0] io_addr = 27'd0;
+reg   [7:0] io_index = 8'd0;
+reg  [15:0] io_dout = 16'd0;
+wire [15:0] io_din;
+wire        hs_pause, hs_upload_req, hs_configured, hs_write, hs_rd, hs_wr;
+wire [23:0] hs_addr;
+wire  [7:0] hs_din, hs_dout;
+xb_hiscore hiscore (
+    .clk(clk_sys), .reset(core_reset), .paused(hs_pause), .autosave(1'b1), .OSD_STATUS(osd),
+    .ioctl_download(io_download), .ioctl_upload(io_upload), .ioctl_wr(io_wr), .ioctl_addr(io_addr),
+    .ioctl_index(io_index), .ioctl_dout(io_dout), .ioctl_din(io_din),
+    .upload_req(hs_upload_req), .configured(hs_configured),
+    .ram_addr(hs_addr), .ram_din(hs_din), .ram_dout(hs_dout), .ram_write(hs_write), .ram_rd(hs_rd), .ram_wr(hs_wr),
+    .pause_req(hs_pause)
+);
+reg [7:0] hs_cfg [0:255];
+reg [7:0] hs_dump [0:255];
+integer hs_cfg_n = 0, hs_dump_n = 0, hs_check;
+initial begin if (!$value$plusargs("hs_check=%d", hs_check)) hs_check = 60; end
+// one ioctl download, 16-bit words, little-endian like hps_io WIDE
+task automatic io_send(input [7:0] index, input integer n, input integer which);
+    integer i;
+    begin
+        io_index = index; io_addr = 27'd0;
+        @(posedge clk_sys); io_download <= 1'b1;
+        repeat (8) @(posedge clk_sys);
+        for (i = 0; i < n; i = i + 2) begin
+            io_addr <= i;
+            io_dout <= which ? {hs_dump[i+1], hs_dump[i]} : {hs_cfg[i+1], hs_cfg[i]};
+            io_wr   <= 1'b1;
+            @(posedge clk_sys); io_wr <= 1'b0;
+            repeat (7) @(posedge clk_sys);
+        end
+        io_download <= 1'b0;
+        repeat (8) @(posedge clk_sys);
+    end
+endtask
+// compare the backup RAM with the dump, entry by entry (cfg: 16-byte header,
+// then 4 address bytes, length, start, end, pad per line)
+task automatic hs_verify;
+    integer e, i, n_ent, bad, total, len; reg [23:0] a; reg [7:0] exp, got; reg [15:0] w;
+    begin
+        n_ent = (hs_cfg_n - 16) / 8; total = 0; bad = 0;
+        for (e = 0; e < n_ent; e = e + 1) begin
+            a = {hs_cfg[16 + 8*e + 1], hs_cfg[16 + 8*e + 2], hs_cfg[16 + 8*e + 3]};
+            len = hs_cfg[16 + 8*e + 4];
+            for (i = 0; i < len; i = i + 1) begin
+                w = ((a[21:14] == 8'hFF) || (a[21:17] == 5'h05)) ? core.backup2.mem[a[13:1]] : core.backup1.mem[a[13:1]];
+                got = a[0] ? w[7:0] : w[15:8];
+                exp = hs_dump[total];
+                if (got != exp) begin bad = bad + 1; if (bad <= 8) $display("HISCORE mismatch %06x: ram %02x dump %02x", a, got, exp); end
+                total = total + 1; a = a + 24'd1;
+            end
+        end
+        $display("HISCORE restore check frame %0d: %0d/%0d bytes match -> %s", frame, total - bad, total, bad == 0 ? "PASS" : "FAIL");
+    end
+endtask
+// read the dump back the way arcade_nvm_save does (index 4 upload)
+task automatic hs_upload_check;
+    integer i, bad; reg [15:0] w;
+    begin
+        bad = 0; io_index = 8'd4; io_addr = 27'd0; io_upload <= 1'b1;
+        repeat (16) @(posedge clk_sys);
+        for (i = 0; i < hs_dump_n; i = i + 2) begin
+            io_addr <= i;
+            repeat (12) @(posedge clk_sys);
+            w = io_din;
+            if (w[7:0] != hs_dump[i] || (i + 1 < hs_dump_n && w[15:8] != hs_dump[i+1])) begin
+                bad = bad + 1;
+                if (bad <= 8) $display("HISCORE upload mismatch @%0d: %04x vs %02x%02x", i, w, hs_dump[i+1], hs_dump[i]);
+            end
+        end
+        io_upload <= 1'b0;
+        $display("HISCORE upload check: %0d bad words -> %s", bad, bad == 0 ? "PASS" : "FAIL");
+    end
+endtask
+integer hs_fd;
+initial begin
+    if (hs_en) begin
+        hs_fd = $fopen({hs_dir, "/hs_cfg.bin"}, "rb");  hs_cfg_n  = $fread(hs_cfg, hs_fd);  $fclose(hs_fd);
+        hs_fd = $fopen({hs_dir, "/hs_dump.bin"}, "rb"); hs_dump_n = $fread(hs_dump, hs_fd); $fclose(hs_fd);
+        $display("HISCORE cfg %0d bytes, dump %0d bytes", hs_cfg_n, hs_dump_n);
+        wait (!reset);
+        repeat (20) @(posedge clk_sys);
+        io_send(8'd5, hs_cfg_n, 0);
+        io_send(8'd4, (hs_dump_n + 1) & ~1, 1);
+        @(posedge clk_sys); hs_loading <= 1'b0;
+        $display("HISCORE loaded, configured=%0d, core released at frame %0d", hs_configured, frame);
+        wait (frame == hs_check);
+        hs_verify;
+        osd <= 1'b1; repeat (200) @(posedge clk_sys); osd <= 1'b0;
+        repeat (4000) @(posedge clk_sys);
+        $display("HISCORE after OSD open: upload_req seen=%0d", hs_upload_req);
+        hs_upload_check;
+    end
+end
 
 // ---- traces
 //  trace_*_rtl.txt : program-space word fetches (FC = 2 user / 6 supervisor)

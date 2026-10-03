@@ -205,12 +205,14 @@ different CPU timing drift in phase, so the gate uses the envelope (>= 0.9).
 - Backup RAM (2 x 16 KB) is NVRAM index 3: written from the host during a
   download (the CPU is in reset), read back through the RAMs' second ports
   on upload; the core raises `ioctl_upload_req` when the game writes the
-  RAM, at most once every ~2 s.
+  RAM, at most once every ~2 s. The four sets with a hiscore table save
+  that table instead, see "Pause and hiscores (M21)".
 - Analog: MiSTer's signed axes map to MAME's After Burner ranges (X
   0x20..0xE0, Y 0x40..0xC0 with PORT_REVERSE so stick up reads high),
   throttle on the right stick's Y; the D-pad emulates full deflection.
 - Pause: a mapped button or "OSD open" freezes both 68000s and the sound
-  section's clock enables.
+  section's clock enables. Since M21 the request comes from JimmyStones'
+  `pause.v`, which also dims the picture after 10 s.
 - ROM caches: Quartus 17 built the sub-CPU cache out of flip-flops (16k
   ALMs), so `xb_rom_cache` instantiates `altsyncram` for its line and tag
   storage with a one-clock read pipeline. The first version of that pipeline
@@ -596,6 +598,69 @@ wrong way round: the game reads a high ADC value as fast).
 Left on the table if a game still overruns: a second run buffer so a
 duplicate row's flush overlaps the next row (the dup path waits for the
 previous flush), and the sprite ROM waits.
+
+## Pause and hiscores (M21)
+
+JimmyStones' Pause_MiSTer and Hiscores_MiSTer, vendored as `rtl/pause/pause.v`
+(0004, upstream b93a5e0) and `rtl/hiscore/hiscore.v` (0014, upstream 31789f3),
+GPL-3 like the rest of the core.
+
+Pause. `pause.v` replaces the hand-rolled toggle in the emu top. Same
+behaviour as before (the button toggles, the OSD holds it when the option is
+set, reset clears it) plus two things: the hiscore module can ask for a
+pause, and the RGB output is halved after ten seconds paused ("Dim video
+after 10s", on by default). Its `pause_cpu` is a register, so the CPUs stop
+one clock after the request.
+
+Hiscores. What turned up while wiring it:
+
+- The X Board main CPU has no work RAM besides the two battery-backed 16 KB
+  RAMs (MAME: $080000 and $0A0000, mirrored at $3F8000 and $3FC000). Every
+  game's scores live there, and the core already saves both RAMs as NVRAM
+  index 3. So at first sight hiscore.v had nothing to do.
+- After Burner (1.31, 1.32) and Racing Hero zero their score table in the
+  first frames after power-on and refill it from ROM, valid battery RAM or
+  not. A MAME write tap with a valid nvram in place counted 236 and 58 word
+  writes into the table area during frames 0 to 3; a table poked into RAM
+  survived the rest of the run but not a power cycle. After Burner II and
+  the other games keep theirs. That is why hiscore.dat lists only aburner
+  and rachero (thndrbld1's line points into backup RAM 2, which the NVRAM
+  save covers).
+- MAME's hiscore.dat lines for both games have the wrong end-check byte.
+  aburner's `ff846e,117,00,00` should end on 0x54 and rachero's
+  `ff89be,51,10,01` on 0x00; those are the bytes the games leave after their
+  own init. With MAME's values the check never passes and nothing is ever
+  restored. `tools/romsets.py` carries the corrected lines; the clones
+  (aburner131, racherod) share the layout, checked the same way.
+- MiSTer Main keeps one `<nvram>` per MRA. For these four sets the saved
+  file is therefore the hiscore table (index 4, 118 or 55 bytes) and the
+  32 KB backup RAM is no longer saved. It only held bookkeeping for them.
+- `hps_io` runs WIDE here (16-bit words, addresses step by 2) and hiscore.v
+  parses a byte stream. `rtl/hiscore/xb_hiscore.sv` replays each word as two
+  byte writes and, on upload, fetches the two bytes of the word the host is
+  asking for in turn (the module answers two clocks after the address). The
+  config stream is `<rom index="5">`, since index 3 is the backup RAM.
+
+The flow: Main sends index 5 then index 4 (document order in the MRA) with
+the core in reset. When reset drops hiscore.v waits 0.34 s, then checks the
+start and end bytes every 1.3 ms. Once the game's defaults are in place it
+pauses the CPUs and writes the table into backup RAM through the CPU port,
+the same borrow an NVRAM download makes; reads use the RAMs' second ports
+and come back one clock later, with a registered byte/bank select to match.
+Opening the OSD pauses for a few microseconds, reads the table back, and if
+it changed and "Autosave hiscores" is on raises `ioctl_upload_req`; without
+autosave the OSD's Save settings writes the file. The option is hidden for
+sets without a table (menu mask bit 4). The hiscore glue and pause module
+sit in the emu top; the core only grew the byte-wide `hs_*` port on its
+backup RAMs.
+
+Verification: `verif/board/check_hiscore.sh` boots After Burner (1.32) with
+a shifted copy of its default table streamed in as the saved file, confirms
+the RAM holds that copy at frame 60 after the game's own wipe-and-refill,
+then opens the OSD and reads the table back through the index 4 upload
+path. MAME's own plugin was not usable as a cross-check (it did not load from
+a private plugin path), so the start/end bytes rest on the memory probes
+above. Hardware: build #32 (2026-10-02), confirmed by the user on 2026-10-03.
 
 ## Later: CPU overclock (parked)
 

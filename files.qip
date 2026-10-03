@@ -37,6 +37,11 @@ set_global_assignment -name SYSTEMVERILOG_FILE rtl/mem/xb_dpram.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/audio/xb_segapcm_5218.sv
 set_global_assignment -name SYSTEMVERILOG_FILE rtl/audio/xb_soundsys.sv
 
+# JimmyStones' Pause_MiSTer and Hiscores_MiSTer (GPL-3), with the 16-bit ioctl glue
+set_global_assignment -name VERILOG_FILE rtl/pause/pause.v
+set_global_assignment -name VERILOG_FILE rtl/hiscore/hiscore.v
+set_global_assignment -name SYSTEMVERILOG_FILE rtl/hiscore/xb_hiscore.sv
+
 set_global_assignment -name QIP_FILE rtl/cpu/fx68k/fx68k.qip
 set_global_assignment -name QIP_FILE rtl/audio/jt51/jt51.qip
 set_global_assignment -name QIP_FILE rtl/audio/T80/T80.qip

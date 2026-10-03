@@ -60,6 +60,16 @@ module xb_core (
     output reg [15:0] nv_dout,
     output reg        nv_modified,
 
+    // hiscore port (JimmyStones' hiscore.v): byte wide, full 68000 addresses,
+    // used only while the CPUs are paused. Reads go through the backup RAMs'
+    // second ports, writes borrow the CPU port like an NVRAM download does.
+    input      [23:0] hs_addr,
+    input       [7:0] hs_din,
+    output      [7:0] hs_dout,        // one clock after hs_addr
+    input             hs_write,       // write strobe (with hs_wr)
+    input             hs_rd,          // hiscore holds the read port
+    input             hs_wr,          // hiscore holds the write port
+
     // inputs (active high)
     input      [15:0] p1_buttons,   // 0 right 1 left 2 down 3 up 4 vulcan 5 missile 6 start 7 coin 8 test 9 service
     input      [15:0] p2_buttons,   // second controller, same layout (Last Survivor)
@@ -244,17 +254,29 @@ assign p0_addr = SDR_MAIN_BASE[24:3] + {5'd0, m_rom_addr};
 wire [15:0] bk1_q, bk2_q, bk1_hq, bk2_hq;
 wire        bk_we1 = m_valid && m_wr && m_sel_bk1 && m_start;
 wire        bk_we2 = m_valid && m_wr && m_sel_bk2 && m_start;
-wire [12:0] bk_a   = nv_download ? nv_addr[12:0] : ma[13:1];
-wire [15:0] bk_d   = nv_download ? nv_din : m_dout;
-wire  [1:0] bk_be  = nv_download ? 2'b11 : m_be;
+// hiscore decodes its address like the CPU: $080000/$3F8000 is bank 1,
+// $0A0000/$3FC000 bank 2; an even address is the word's upper byte (UDS)
+wire        hs_bk1 = (hs_addr[21:17] == 5'h04) || (hs_addr[21:14] == 8'hFE);
+wire        hs_bk2 = (hs_addr[21:17] == 5'h05) || (hs_addr[21:14] == 8'hFF);
+wire [12:0] bk_a   = nv_download ? nv_addr[12:0] : hs_wr ? hs_addr[13:1] : ma[13:1];
+wire [15:0] bk_d   = nv_download ? nv_din : hs_wr ? {hs_din, hs_din} : m_dout;
+wire  [1:0] bk_be  = nv_download ? 2'b11 : hs_wr ? {~hs_addr[0], hs_addr[0]} : m_be;
+wire        bk_we1_a = nv_download ? (nv_wr && !nv_addr[13]) : hs_wr ? (hs_write && hs_bk1) : bk_we1;
+wire        bk_we2_a = nv_download ? (nv_wr &&  nv_addr[13]) : hs_wr ? (hs_write && hs_bk2) : bk_we2;
+wire [12:0] bk_b   = hs_rd ? hs_addr[13:1] : nv_addr[12:0];
 xb_dpram #(.AW(13)) backup1 (.clk(clk_sys), .a_addr(bk_a), .a_din(bk_d), .a_be(bk_be),
-    .a_we(nv_download ? (nv_wr && !nv_addr[13]) : bk_we1), .a_dout(bk1_q),
-    .b_clk(clk_sys), .b_addr(nv_addr[12:0]), .b_dout(bk1_hq));
+    .a_we(bk_we1_a), .a_dout(bk1_q),
+    .b_clk(clk_sys), .b_addr(bk_b), .b_dout(bk1_hq));
 xb_dpram #(.AW(13)) backup2 (.clk(clk_sys), .a_addr(bk_a), .a_din(bk_d), .a_be(bk_be),
-    .a_we(nv_download ? (nv_wr && nv_addr[13]) : bk_we2), .a_dout(bk2_q),
-    .b_clk(clk_sys), .b_addr(nv_addr[12:0]), .b_dout(bk2_hq));
+    .a_we(bk_we2_a), .a_dout(bk2_q),
+    .b_clk(clk_sys), .b_addr(bk_b), .b_dout(bk2_hq));
 // upload: word for the host's address (port B, one clock behind the address)
 always @(posedge clk_sys) nv_dout <= nv_addr[13] ? bk2_hq : bk1_hq;
+// hiscore read: the byte of the word port B returns for last clock's address
+reg hs_bk2_d, hs_lo_d;
+always @(posedge clk_sys) begin hs_bk2_d <= hs_bk2; hs_lo_d <= hs_addr[0]; end
+wire [15:0] hs_word = hs_bk2_d ? bk2_hq : bk1_hq;
+assign hs_dout = hs_lo_d ? hs_word[7:0] : hs_word[15:8];
 // modified flag: set on a CPU write, cleared when an upload starts; held off
 // for ~2 s after each request so the host is not flooded with saves
 reg [7:0] nv_hold;

@@ -31,6 +31,7 @@ expanders, a YM2151 and a 315-5218 PCM chip.
 | M18 | Road ROM in SDRAM (line prefetch, frees 64 M10K blocks) | done: confirmed on hardware (build #28, 488/553 M10K) |
 | M19 | Enhanced sprites (640x448 sprite rendering, opt-in OSD option) | done: confirmed on hardware (build #29, 488/553 M10K). Known issue: with the option on, Racing Hero loses rows at the bottom of the screen from the start of a race (fine with it off), fixed in M20 (build #31) |
 | M20 | Renderer speed for the 2x mode (duplicate rows, erase at the swap) and MiSTer-devel OSD feedback (button order, D-pad default) | done: confirmed on hardware (build #31, 488/553 M10K); Racing Hero start grid renders in 12.1 ms against a 15.7 ms window, no aborts |
+| M21 | Pause_MiSTer and Hiscores_MiSTer: dim video while paused, score restore for After Burner and Racing Hero | done: confirmed on hardware (build #32, 492/553 M10K, 70% ALMs, no negative slack) |
 | later | CPU overclock (12.5/15/18.75/25 MHz, opt-in) | parked, see docs/DESIGN.md |
 | M17 | Analog sensitivity (response curves for stick and wheel games) and per-game OSD | done: confirmed on hardware (build #27) |
 
@@ -89,7 +90,14 @@ reset, as centre, for a thumbstick that drifts), Gun control for Line
 of Fire (lightgun or gamepad cursor, with per-player cursor speed and an
 optional crosshair), rear speakers for Super Monaco GP, and pause while
 the OSD is open. The Pause button toggles: one press pauses, the next
-resumes. Options that do not apply to the loaded game are hidden
+resumes, and after ten seconds paused the picture dims (Dim video, on by
+default). High scores: After Burner (1.31 and 1.32) and Racing Hero wipe
+their score table every time they power on, so for those four sets the
+core puts a saved table back once the game has booted and reads it out
+again when you open the OSD. Turn on Autosave hiscores to have it written
+to the SD card by itself; otherwise Save settings in the OSD does it. The
+other games keep their scores in battery RAM, which the core already
+saves. Options that do not apply to the loaded game are hidden
 (the MRA's board descriptor drives the framework's menu mask).
 
 ## Layout
@@ -100,6 +108,7 @@ files.qip                            file list (edit this, never the IDE)
 build.bat / clean.bat                Windows build with Quartus Prime 17.0 Lite
 sys/                                 MiSTer framework (vendored)
 rtl/                                 the board: xb_pkg, xb_core, cpu/ video/ audio/ io/ mem/ pll/
+                                     pause/ hiscore/ are JimmyStones' MiSTer modules plus glue
 tools/                               ROM table, MRA generator, stream packer, MAME capture
 verif/                               golden models, cocotb unit tests, Verilator board sim
 docs/                                design notes and hardware references
@@ -133,6 +142,7 @@ python3 tools/trace_compare.py verif/golden/aburner2/trace_main_mame.txt verif/b
 python3 tools/mame_capture.py aburner2 --frame 60 --out verif/golden/aburner2/f60   # RAM dumps + PNG
 sh verif/board/check_m1.sh                    # CPU trace gate
 sh verif/board/check_m2.sh                    # tilemap/text/palette gate
+sh verif/board/check_hiscore.sh               # hiscore restore and save-back on After Burner
 sh verif/board/check_m3.sh                    # sprite gate
 sh verif/board/check_m4.sh                    # road gate (full-frame exact vs MAME)
 sh verif/board/check_m5.sh                    # sound gate (PCM cocotb + audio envelope vs MAME)

@@ -15,7 +15,10 @@ def expand_mra(text, zf):
     """Minimal MRA expander for the subset gen_mra emits."""
     import re
     out = bytearray()
+    # only <rom index="0"> is the stream; a hiscore <rom index="5"> is not
     lines = text.splitlines()
+    end = next(i for i, l in enumerate(lines) if l.strip() == "</rom>")
+    lines = lines[:end]
     i = 0
     def rom(name):
         c = [n for n in zf.namelist() if n.split("/")[-1] == name]
@@ -87,3 +90,22 @@ def test_w16_word_order():
 def test_x32_dword_order():
     out = pack_roms.build_region("x32", [bytes([1]), bytes([2]), bytes([3]), bytes([4])])
     assert int.from_bytes(out, "little") == 0x04030201
+
+
+@pytest.mark.parametrize("key", [k for k, rs in romsets.ROMSETS.items() if "hiscore" in rs])
+def test_hiscore_config(key):
+    """hiscore.v parses the header and lines back from the byte stream, and the
+    MRA's nvram size must equal the bytes the module will upload, or the host
+    truncates or pads the save."""
+    rs = romsets.ROMSETS[key]
+    cfg = gen_mra.hiscore_config(rs)
+    assert len(cfg) == 16 + 8 * len(rs["hiscore"])
+    assert cfg[15] == 0                        # no change mask: lines start at byte 16
+    for n, (addr, length, start, end) in enumerate(rs["hiscore"]):
+        line = cfg[16 + 8 * n:24 + 8 * n]
+        assert int.from_bytes(line[0:4], "big") == addr
+        assert line[4:7] == bytes([length, start, end])
+        assert (addr & 0x3FFFFF) >> 14 in (0xFE, 0xFF) or (addr & 0x3FFFFF) >> 17 in (4, 5), "not backup RAM"
+    mra = gen_mra.make_mra(key, rs)
+    assert f'<nvram index="4" size="{gen_mra.hiscore_size(rs)}"/>' in mra
+    assert '<nvram index="3"' not in mra

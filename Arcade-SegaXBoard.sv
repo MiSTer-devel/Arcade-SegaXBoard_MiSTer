@@ -135,6 +135,8 @@ localparam CONF_STR = {
     "H2O[26:25],Analog range,100%,75%,50%;",
     "H3O[27],Analog zero calibration,Off,On;",
     "O[10],Pause when OSD open,Off,On;",
+    "O[30],Dim video after 10s,On,Off;",
+    "H4O[31],Autosave hiscores,Off,On;",
     "H0O[11],Rear speakers,On,Off;",
     "H1O[12],Gun control,Lightgun,Gamepad;",
     "H1O[16:13],P1 cursor speed,50,60,70,80,90,100,10,20,30,40;",
@@ -207,8 +209,8 @@ hps_io #(.CONF_STR(CONF_STR), .WIDE(1)) hps_io (
 
     .ioctl_download(ioctl_download),
     .ioctl_upload(ioctl_upload),
-    .ioctl_upload_req(nv_modified),
-    .ioctl_upload_index(8'd3),
+    .ioctl_upload_req(nv_modified | hs_upload_req),
+    .ioctl_upload_index(hs_configured ? 8'd4 : 8'd3),
     .ioctl_wr(ioctl_wr),
     .ioctl_rd(ioctl_rd),
     .ioctl_addr(ioctl_addr),
@@ -237,9 +239,13 @@ end
 
 // NVRAM (backup RAM, 32 KB) as ioctl index 3: download at load, upload on
 // request; the core asserts nv_modified when the game writes the RAM.
+// Games whose MRA carries a hiscore table save that table as index 4
+// instead (see the hiscore block below); the two never share an MRA.
 wire        nv_modified;
+wire [15:0] nv_dout;
 wire        nv_download = ioctl_download && (ioctl_index[7:0] == 8'd3);
 wire        nv_upload   = ioctl_upload   && (ioctl_index[7:0] == 8'd3);
+assign ioctl_din = (ioctl_index[7:0] == 8'd4) ? hs_ioctl_din : nv_dout;
 
 ////////////////////////////   ROM LOADING   //////////////////////////////////
 wire        sw_req, sw_ack;
@@ -247,7 +253,8 @@ wire [24:1] sw_addr;
 wire [15:0] sw_din;
 wire  [1:0] sw_be;
 board_desc_t board_desc;
-assign status_menumask = {12'd0,
+assign status_menumask = {11'd0,
+    ~hs_configured,                // bit 4: no hiscore table in the MRA
     ~(board_desc.has_throttle && board_desc.ana_mode == 3'd0),   // bit 3: After Burner stick options
     board_desc.ana_mode == 3'd5,   // bit 2: gun game, no stick/analog options
     ~board_desc.gun_inputs,        // bit 1: no gun options
@@ -304,8 +311,11 @@ sdram sdram (
 // the core encodes 0 analog, 1 d-pad, 2 both
 wire [1:0] stick_mode = (status[9:8] == 2'd0) ? 2'd1 : (status[9:8] == 2'd1) ? 2'd0 : 2'd2;
 
-// Pause: the mapped button (joystick bit 10) toggles a latch on each press,
-// or the OSD open with the option set holds it. Reset clears the latch.
+// Pause: JimmyStones' pause module below. The mapped button (joystick bit
+// 10) toggles on each press, the OSD holds it when the option is set, and
+// the hiscore module asks for it around its RAM accesses; reset clears the
+// toggle. After 10 s paused the picture is dimmed (OSD option) against
+// burn-in.
 // Button positions follow the MRA's list, which puts the buttons players bind
 // first at the front. Three layouts, chosen from the board descriptor:
 //   driving (wheel/pedal analog modes): Gas, Brake, A, B, Start, Coin, Pause, Test, Service
@@ -325,16 +335,40 @@ function automatic [15:0] map_buttons(input [15:0] j, input [1:0] lay);
 endfunction
 wire [15:0] p1_btn = map_buttons(joystick_0[15:0], btn_layout);
 wire [15:0] p2_btn = map_buttons(joystick_1[15:0], btn_layout);
-reg  pause_btn_d, pause_latch;
-always @(posedge clk_sys) begin
-    pause_btn_d <= p1_btn[10];
-    if (reset) pause_latch <= 1'b0;
-    else if (p1_btn[10] && !pause_btn_d) pause_latch <= ~pause_latch;
-end
-wire pause = pause_latch | (status[10] & OSD_STATUS);
+wire        pause, hs_pause;
+wire  [7:0] r, g, b;
+wire [23:0] rgb_paused;
+pause #(.RW(8), .GW(8), .BW(8), .CLKSPD(50)) pause_sys (
+    .clk_sys(clk_sys),
+    .reset(reset),
+    .user_button(p1_btn[10]),
+    .pause_request(hs_pause),
+    .options({~status[30], status[10]}),   // [1] dim after 10 s, [0] pause in OSD
+    .OSD_STATUS(OSD_STATUS),
+    .r(r), .g(g), .b(b),
+    .pause_cpu(pause),
+    .rgb_out(rgb_paused)
+);
+
+//////////////////////////////   HISCORE   ////////////////////////////////////
+// Scores the game keeps in battery RAM but wipes at boot (After Burner,
+// Racing Hero): the MRA carries the hiscore.dat entries as <rom index="5">
+// and the saved table as <nvram index="4">; the module restores the table
+// once the game has initialised it and reads it back when the OSD opens.
+wire        hs_upload_req, hs_configured, hs_write, hs_rd, hs_wr;
+wire [23:0] hs_addr;
+wire  [7:0] hs_din, hs_dout;
+wire [15:0] hs_ioctl_din;
+xb_hiscore hiscore (
+    .clk(clk_sys), .reset(reset), .paused(pause), .autosave(status[31]), .OSD_STATUS(OSD_STATUS),
+    .ioctl_download(ioctl_download), .ioctl_upload(ioctl_upload), .ioctl_wr(ioctl_wr),
+    .ioctl_addr(ioctl_addr), .ioctl_index(ioctl_index[7:0]), .ioctl_dout(ioctl_dout), .ioctl_din(hs_ioctl_din),
+    .upload_req(hs_upload_req), .configured(hs_configured),
+    .ram_addr(hs_addr), .ram_din(hs_din), .ram_dout(hs_dout),
+    .ram_write(hs_write), .ram_rd(hs_rd), .ram_wr(hs_wr), .pause_req(hs_pause)
+);
 
 //////////////////////////////   CORE   ///////////////////////////////////////
-wire  [7:0] r, g, b;
 wire        ce_pix, hs, vs, hb, vb;
 wire signed [15:0] aud_l, aud_r;
 
@@ -367,7 +401,8 @@ xb_core core (
     .service(p1_btn[9]), .test(status[7] | p1_btn[8]),
     .coin1(p1_btn[7]), .coin2(1'b0),
     .nv_download(nv_download), .nv_upload(nv_upload), .nv_wr(ioctl_wr), .nv_rd(ioctl_rd),
-    .nv_addr(ioctl_addr[15:1]), .nv_din(ioctl_dout), .nv_dout(ioctl_din), .nv_modified(nv_modified),
+    .nv_addr(ioctl_addr[15:1]), .nv_din(ioctl_dout), .nv_dout(nv_dout), .nv_modified(nv_modified),
+    .hs_addr(hs_addr), .hs_din(hs_din), .hs_dout(hs_dout), .hs_write(hs_write), .hs_rd(hs_rd), .hs_wr(hs_wr),
     .r(r), .g(g), .b(b),
     .ce_vid(ce_pix), .hs(hs), .vs(vs), .hb(hb), .vb(vb),
     .audio_l(aud_l), .audio_r(aud_r),
@@ -398,7 +433,7 @@ arcade_video #(.WIDTH(320), .DW(24), .GAMMA(1)) arcade_video (
     .gamma_bus(gamma_bus),
     .clk_video(clk_sys),
     .ce_pix(ce_pix),
-    .RGB_in({r, g, b}),
+    .RGB_in(rgb_paused),
     .HBlank(hb),
     .VBlank(vb),
     .HSync(hs),

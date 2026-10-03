@@ -16,6 +16,15 @@ flags (see xb_pkg.sv), `ana_mode` (0 = After Burner analog ranges, 1 = full
 range with the throttle on ADC channel 1 and stick Y on channel 2 as Thunder
 Blade wires them), `dip_default` (SWA, SWB as MAME's port values, 1 = off),
 `dips` [(bit_lo, bit_hi, name, ids ordered by value)] and `buttons`.
+
+`hiscore`, where present, lists (address, length, start, end) like a MAME
+hiscore.dat line: the game keeps that table in battery RAM but wipes and
+refills it at boot, so the core restores a saved copy once the start/end
+bytes show the game's defaults are in place (JimmyStones' hiscore.v). The
+start/end values are what the game leaves there after its own init (read
+from MAME), which is where MAME's hiscore.dat entries for these sets are
+wrong. The MRA then saves this table as its one NVRAM (index 4) instead of
+the 32 KB backup RAM, which only held bookkeeping for these games.
 """
 
 SLOT = {
@@ -127,6 +136,7 @@ ROMSETS = {
             (13, 13, "Allow Continue", "Yes,No"),
             (14, 15, "Difficulty", "Hardest,Hard,Easy,Normal"),
         ],
+        "hiscore": [(0xFF846E, 117, 0x00, 0x54), (0xFF857F, 1, 0x4F, 0x4F)],
         "buttons": ("Vulcan,Missile,Speed Up,Slow Down,Start,Coin,Pause,Test,Service", "A,B,R2,L2,Start,R,X,L,Select"),
         "regions": {
             "main": ("w16", [
@@ -197,6 +207,7 @@ ROMSETS = {
             (13, 13, "Allow Continue", "Yes,No"),
             (14, 15, "Difficulty", "Hardest,Hard,Easy,Normal"),
         ],
+        "hiscore": [(0xFF846E, 117, 0x00, 0x54), (0xFF857F, 1, 0x4F, 0x4F)],
         "buttons": ("Vulcan,Missile,Speed Up,Slow Down,Start,Coin,Pause,Test,Service", "A,B,R2,L2,Start,R,X,L,Select"),
         "regions": {
             "main": ("w16", [
@@ -651,6 +662,7 @@ ROMSETS = {
             (12, 13, 'Time', 'Very Hard,Easy,Hard,Normal'),
             (14, 15, 'Difficulty', 'Very Hard,Easy,Hard,Normal'),
         ],
+        "hiscore": [(0xFF89BE, 51, 0x10, 0x00), (0xFF89AE, 4, 0x10, 0x00)],
         "buttons": ("Gas,Brake,-,-,Start,Coin,Pause,Test,Service", "Y,L2,A,B,Start,R,X,L,Select"),
         "regions": {
             "main": ("w16", [
@@ -726,6 +738,7 @@ ROMSETS = {
             (12, 13, 'Time', 'Very Hard,Easy,Hard,Normal'),
             (14, 15, 'Difficulty', 'Very Hard,Easy,Hard,Normal'),
         ],
+        "hiscore": [(0xFF89BE, 51, 0x10, 0x00), (0xFF89AE, 4, 0x10, 0x00)],
         "buttons": ("Gas,Brake,-,-,Start,Coin,Pause,Test,Service", "Y,L2,A,B,Start,R,X,L,Select"),
         "regions": {
             "main": ("w16", [
